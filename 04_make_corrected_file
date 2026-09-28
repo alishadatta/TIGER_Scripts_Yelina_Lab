@@ -1,0 +1,11 @@
+bcftools view -H -i 'MQ>=40 && DP>=10' beth.calls.vcf | \
+awk '
+$1 ~ /^Chr[1-5]$/ && length($4)==1 && length($5)==1 {
+    split($8,a,"DP4=");
+    split(a[2],b,";");
+    split(b[1],c,",");
+    ref=c[1]+c[2];
+    alt=c[3]+c[4];
+    if(ref>=2 && alt>=2) print $1,$2
+}' | \
+sed 's/^Chr//' > markers/corrected_marker_provisional.txt
