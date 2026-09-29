@@ -3,24 +3,24 @@
 #SBATCH --output=logs/tiger500_%A_%a.log
 #SBATCH --error=logs/tiger500_%A_%a.err
 #SBATCH --array=1-500
-#SBATCH --time=12:00:00
+#SBATCH --time=02:00:00
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+#SBATCH --mem=8G
 #SBATCH --chdir=/scratch/ltwb0962/Tiger_Pipeline
 
 set -euo pipefail
 
 BASE=/scratch/ltwb0962/Tiger_Pipeline
 
-SAMTOOLS=$HOME/.conda/envs/bcftools_env/bin/samtools
 BCFTOOLS=$HOME/.conda/envs/bcftools_env/bin/bcftools
 
 REF=$BASE/TAIR10.fa
 SAMPLE_LIST=$BASE/input/sample_list_500.txt
 BAM_DIR=$BASE/results/mapped
 
-COMP_MARKERS=$BASE/markers/complete_marker.txt
-CORR_MARKERS=$BASE/markers/corrected_marker_provisional.txt
+COMP_ALLELES=$BASE/markers/complete_marker_alleles.txt
+CORR_ALLELES=$BASE/markers/corrected_marker_provisional_alleles.txt
+
 COMP_REGIONS=$BASE/input/tiger500/complete_regions.txt
 
 OUT_DIR=$BASE/input/tiger500
@@ -39,63 +39,130 @@ if [[ ! -s "$BAM" ]]; then
     exit 1
 fi
 
-VCF=$OUT_DIR/${SAMPLE}.vcf.gz
-CALLS=$OUT_DIR/${SAMPLE}.calls.txt
-COMP_OUT=$OUT_DIR/${SAMPLE}.complete.txt
-CORR_OUT=$OUT_DIR/${SAMPLE}.corrected.txt
+if [[ ! -s "$COMP_ALLELES" ]]; then
+    echo "ERROR: Complete allele file not found"
+    exit 1
+fi
 
-echo "Running samtools mpileup..."
+if [[ ! -s "$CORR_ALLELES" ]]; then
+    echo "ERROR: Corrected allele file not found"
+    exit 1
+fi
 
-"$SAMTOOLS" mpileup \
-    -E \
-    --skip-indels \
-    --output-tags DP,DP4 \
+TMP_COUNTS=$(mktemp)
+TMP_COMPLETE=$(mktemp)
+TMP_CORRECTED=$(mktemp)
+
+trap 'rm -f "$TMP_COUNTS" "$TMP_COMPLETE" "$TMP_CORRECTED"' EXIT
+
+echo "Running bcftools mpileup + call..."
+
+"$BCFTOOLS" mpileup \
     -f "$REF" \
     -R "$COMP_REGIONS" \
     "$BAM" \
     -Ou | \
 "$BCFTOOLS" call \
-    --multiallelic-caller \
+    -m \
     --skip-variants indels \
-    -Oz \
-    -o "$VCF"
-
-"$BCFTOOLS" index -f "$VCF"
-
-echo "Extracting allele counts..."
-
+    -Ou | \
 "$BCFTOOLS" query \
-    -f '%CHROM\t%POS\t%REF\t%ALT\t%DP4\n' \
-    "$VCF" | \
+    -f '%CHROM\t%POS\t%DP4\n' | \
 awk '
 BEGIN { OFS="\t" }
 {
-    split($5,d,",")
+    split($3,d,",")
     ref_reads=d[1]+d[2]
     alt_reads=d[3]+d[4]
 
-    if (substr($1,1,3) == "Chr")
-        chr=substr($1,4)
-    else
-        chr=$1
-
-    print chr,$2,$3,ref_reads,$4,alt_reads
+    print substr($1,4),$2,ref_reads,alt_reads
 }
-' > "$CALLS"
+' > "$TMP_COUNTS"
 
-echo "Creating complete TIGER input..."
+echo "Building complete TIGER input..."
 
-perl "$BASE/TIGER_Module/tiger-pipeline/workflow/TIGER_Scripts-for-distribution/get_subset_2.pl" \
-    -c "$CALLS" \
-    -p "$COMP_MARKERS" \
-    -o "$COMP_OUT"
+awk '
+BEGIN { OFS="\t" }
 
-echo "Creating corrected TIGER input..."
+NR==FNR {
+    allele[$1"\t"$2]=$3"\t"$4
+    next
+}
 
-perl "$BASE/TIGER_Module/tiger-pipeline/workflow/TIGER_Scripts-for-distribution/get_subset_2.pl" \
-    -c "$CALLS" \
-    -p "$CORR_MARKERS" \
-    -o "$CORR_OUT"
+{
+    key=$1"\t"$2
+    count[key]=$3"\t"$4
+}
+
+END {
+    for (key in allele) {
+        split(key,k,"\t")
+        split(allele[key],a,"\t")
+
+        if (key in count) {
+            split(count[key],c,"\t")
+            print k[1],k[2],a[1],c[1],a[2],c[2]
+        }
+        else {
+            print k[1],k[2],a[1],0,a[2],0
+        }
+    }
+}
+' "$COMP_ALLELES" "$TMP_COUNTS" |
+sort -k1,1n -k2,2n > "$TMP_COMPLETE"
+
+echo "Building corrected TIGER input..."
+
+awk '
+BEGIN { OFS="\t" }
+
+NR==FNR {
+    allele[$1"\t"$2]=$3"\t"$4
+    next
+}
+
+{
+    key=$1"\t"$2
+    count[key]=$3"\t"$4
+}
+
+END {
+    for (key in allele) {
+        split(key,k,"\t")
+        split(allele[key],a,"\t")
+
+        if (key in count) {
+            split(count[key],c,"\t")
+            print k[1],k[2],a[1],c[1],a[2],c[2]
+        }
+        else {
+            print k[1],k[2],a[1],0,a[2],0
+        }
+    }
+}
+' "$CORR_ALLELES" "$TMP_COUNTS" |
+sort -k1,1n -k2,2n > "$TMP_CORRECTED"
+
+mv "$TMP_COMPLETE" "$OUT_DIR/input_complete_${SAMPLE}.txt"
+mv "$TMP_CORRECTED" "$OUT_DIR/input_corrected_${SAMPLE}.txt"
+
+echo "Checking output..."
+
+COMP_N=$(wc -l < "$OUT_DIR/input_complete_${SAMPLE}.txt")
+CORR_N=$(wc -l < "$OUT_DIR/input_corrected_${SAMPLE}.txt")
+
+echo "Complete markers:  $COMP_N"
+echo "Corrected markers: $CORR_N"
+
+if [[ "$COMP_N" -ne 484712 ]]; then
+    echo "ERROR: Unexpected complete marker count!"
+    exit 1
+fi
+
+if [[ "$CORR_N" -ne 200998 ]]; then
+    echo "ERROR: Unexpected corrected marker count!"
+    exit 1
+fi
 
 echo "=========================================="
 echo "Finished: $SAMPLE"
