@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=tiger500
-#SBATCH --output=logs/tiger500_%A_%a.log
-#SBATCH --error=logs/tiger500_%A_%a.err
+#SBATCH --job-name=tiger_beth
+#SBATCH --output=logs/tiger_beth_%A_%a.log
+#SBATCH --error=logs/tiger_beth_%A_%a.err
 #SBATCH --array=1-500
 #SBATCH --time=02:00:00
 #SBATCH --cpus-per-task=4
@@ -18,10 +18,8 @@ REF=$BASE/TAIR10.fa
 SAMPLE_LIST=$BASE/input/sample_list_500.txt
 BAM_DIR=$BASE/results/mapped
 
-COMP_ALLELES=$BASE/markers/complete_marker_alleles.txt
-CORR_ALLELES=$BASE/markers/corrected_marker_provisional_alleles.txt
-
-COMP_REGIONS=$BASE/input/tiger500/complete_regions.txt
+BETH_MASK=$BASE/markers/beth.mask.txt
+BETH_REGIONS=$BASE/markers/beth.mask.regions.txt
 
 OUT_DIR=$BASE/input/tiger500
 
@@ -39,27 +37,25 @@ if [[ ! -s "$BAM" ]]; then
     exit 1
 fi
 
-if [[ ! -s "$COMP_ALLELES" ]]; then
-    echo "ERROR: Complete allele file not found"
+if [[ ! -s "$BETH_MASK" ]]; then
+    echo "ERROR: beth.mask.txt not found"
     exit 1
 fi
 
-if [[ ! -s "$CORR_ALLELES" ]]; then
-    echo "ERROR: Corrected allele file not found"
+if [[ ! -s "$BETH_REGIONS" ]]; then
+    echo "ERROR: beth.mask.regions.txt not found"
     exit 1
 fi
 
 TMP_COUNTS=$(mktemp)
-TMP_COMPLETE=$(mktemp)
-TMP_CORRECTED=$(mktemp)
 
-trap 'rm -f "$TMP_COUNTS" "$TMP_COMPLETE" "$TMP_CORRECTED"' EXIT
+trap 'rm -f "$TMP_COUNTS"' EXIT
 
 echo "Running bcftools mpileup + call..."
 
 "$BCFTOOLS" mpileup \
     -f "$REF" \
-    -R "$COMP_REGIONS" \
+    -R "$BETH_REGIONS" \
     "$BAM" \
     -Ou | \
 "$BCFTOOLS" call \
@@ -79,88 +75,38 @@ BEGIN { OFS="\t" }
 }
 ' > "$TMP_COUNTS"
 
-echo "Building complete TIGER input..."
+echo "Building Beth TIGER input..."
 
 awk '
 BEGIN { OFS="\t" }
 
 NR==FNR {
-    allele[$1"\t"$2]=$3"\t"$4
+    count[$1"\t"$2]=$3"\t"$4
     next
 }
 
 {
     key=$1"\t"$2
-    count[key]=$3"\t"$4
-}
 
-END {
-    for (key in allele) {
-        split(key,k,"\t")
-        split(allele[key],a,"\t")
-
-        if (key in count) {
-            split(count[key],c,"\t")
-            print k[1],k[2],a[1],c[1],a[2],c[2]
-        }
-        else {
-            print k[1],k[2],a[1],0,a[2],0
-        }
+    if (key in count) {
+        split(count[key],c,"\t")
+        print $1,$2,$3,c[1],$5,c[2]
+    } else {
+        print $1,$2,$3,0,$5,0
     }
 }
-' "$COMP_ALLELES" "$TMP_COUNTS" |
-sort -k1,1n -k2,2n > "$TMP_COMPLETE"
-
-echo "Building corrected TIGER input..."
-
-awk '
-BEGIN { OFS="\t" }
-
-NR==FNR {
-    allele[$1"\t"$2]=$3"\t"$4
-    next
-}
-
-{
-    key=$1"\t"$2
-    count[key]=$3"\t"$4
-}
-
-END {
-    for (key in allele) {
-        split(key,k,"\t")
-        split(allele[key],a,"\t")
-
-        if (key in count) {
-            split(count[key],c,"\t")
-            print k[1],k[2],a[1],c[1],a[2],c[2]
-        }
-        else {
-            print k[1],k[2],a[1],0,a[2],0
-        }
-    }
-}
-' "$CORR_ALLELES" "$TMP_COUNTS" |
-sort -k1,1n -k2,2n > "$TMP_CORRECTED"
-
-mv "$TMP_COMPLETE" "$OUT_DIR/input_complete_${SAMPLE}.txt"
-mv "$TMP_CORRECTED" "$OUT_DIR/input_corrected_${SAMPLE}.txt"
+' "$TMP_COUNTS" "$BETH_MASK" \
+| sort -k1,1n -k2,2n \
+> "$OUT_DIR/input_beth_${SAMPLE}.txt"
 
 echo "Checking output..."
 
-COMP_N=$(wc -l < "$OUT_DIR/input_complete_${SAMPLE}.txt")
-CORR_N=$(wc -l < "$OUT_DIR/input_corrected_${SAMPLE}.txt")
+N=$(wc -l < "$OUT_DIR/input_beth_${SAMPLE}.txt")
 
-echo "Complete markers:  $COMP_N"
-echo "Corrected markers: $CORR_N"
+echo "Beth markers: $N"
 
-if [[ "$COMP_N" -ne 484712 ]]; then
-    echo "ERROR: Unexpected complete marker count!"
-    exit 1
-fi
-
-if [[ "$CORR_N" -ne 200998 ]]; then
-    echo "ERROR: Unexpected corrected marker count!"
+if [[ "$N" -ne 132892 ]]; then
+    echo "ERROR: Unexpected marker count!"
     exit 1
 fi
 
